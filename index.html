@@ -15,6 +15,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
 <style>
 :root{
   --ink:#14181B;
@@ -230,6 +231,13 @@ input[type=checkbox]{
 .crow span{font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);flex:0 0 76px;padding-top:3px}
 .crow b{font-weight:500;flex:1;min-width:0}
 .crow.vuota b{color:#9AA5A5;font-family:var(--mono)}
+.msuser{display:flex;align-items:center;gap:9px;font-size:13px;margin-bottom:10px}
+.msuser .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:0 0 auto}
+.msuser .dot.off{background:var(--ink-3)}
+.msuser b{font-weight:500}
+.msuser small{display:block;font-family:var(--mono);font-size:9.5px;color:var(--ink-3)}
+.msnote{font-size:12px;line-height:1.45;color:var(--ink-2);margin-top:9px}
+.msnote.warn{color:var(--nc);font-weight:500}
 .att{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--line)}
 .att:last-child{border-bottom:0}
 .att-l{flex:1;font-size:13px;line-height:1.35}
@@ -681,6 +689,11 @@ nav button.on{color:var(--hi)}
     <div id="verLogBox" class="hidden" style="margin-top:9px"></div>
   </div>
 
+  <div class="sec">Microsoft 365</div>
+  <div class="card">
+    <div id="msBox"></div>
+  </div>
+
   <div class="sec">Backup completo</div>
   <div class="card">
     <div class="btn-row">
@@ -836,11 +849,18 @@ const LOGO_D2A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANoAAABuCAAAAABk
 const D2A_SEDE = "Via Adelaide Bono Cairoli 30, 20127 Milano (MI)";
 const D2A_PIVA = "P.IVA e C.F. 10532430963";
 
-const APP_VER  = "1.0";
+const APP_VER  = "1.1";
 const APP_DATA = "2026-08-25";
 const MOD_VER  = "REV 04/2026";
 
 const STORICO_APP = [
+  ["1.1", "2026-08-25", [
+    "Accesso con account D2A e deposito della commessa su SharePoint",
+    "Deposito automatico alla chiusura di ogni revisione",
+    "Avviso quando su SharePoint c'è un deposito più recente",
+    "Voci aggiuntive per ogni gruppo della checklist",
+    "Logo e intestazione D2A nel PDF di campo"
+  ]],
   ["1.0", "2026-08-25", [
     "Versioni tracciate: app e modello di verbale",
     "Checklist congelata per commessa, con allineamento su richiesta",
@@ -1021,6 +1041,7 @@ async function boot(){
   CID = (ultima && COMMESSE.some(c=>c.id === ultima)) ? ultima : COMMESSE[0].id;
   await caricaCommessa();
   avviaObserver();
+  msInit();
 }
 
 async function caricaCommessa(){
@@ -1101,6 +1122,7 @@ async function caricaCommessa(){
     if(v) IMG[id] = v;
   }
   renderAll(); mostraTav(); renderComSwitch();
+  msStato = ""; renderMS(); controllaRemoto();
   loadIndex().then(renderStorico).catch(()=>{});
   if(!COM.committente && !COM.indirizzo){
     if($("#comForm").classList.contains("hidden")) $("#comEdit").click();
@@ -1274,7 +1296,7 @@ $$("nav button").forEach(b=>{
     b.classList.add("on");
     $("#p-"+b.dataset.p).classList.add("on");
     window.scrollTo(0,0);
-    if(b.dataset.p === "exp"){ buildExport(); renderVersione(); loadIndex().then(renderStorico); }
+    if(b.dataset.p === "exp"){ buildExport(); renderVersione(); renderMS(); loadIndex().then(renderStorico); }
     if(b.dataset.p === "sic") renderNC();
     if(b.dataset.p === "plan") drawPlan();
   };
@@ -3416,10 +3438,12 @@ function dlFile(name, blob){
   setTimeout(()=>URL.revokeObjectURL(u), 4000);
 }
 
-$("#bkSave").onclick = async ()=>{
-  toast("Preparo il backup…");
+/* Il pacchetto della commessa: tutto ciò che serve a ricostruirla altrove. */
+async function costruisciBackup(){
   const idx = await loadIndex();
-  const pack = {v:3, salvato:new Date().toISOString(), com:COM, tavole:TAVOLE, stato:S, index:idx, rev:{}, img:{}};
+  const pack = {v:4, salvato:new Date().toISOString(), app:APP_VER,
+                autore:(msUser && msUser.name) || "",
+                com:COM, tavole:TAVOLE, stato:S, index:idx, rev:{}, img:{}};
   const ids = [];
   TAVOLE.forEach(t=>ids.push(t.img));
   const raccogli = st=>{
@@ -3439,6 +3463,28 @@ $("#bkSave").onclick = async ()=>{
     if(!d) d = await store.get("img:" + id);
     if(d) pack.img[id] = d;
   }
+  return pack;
+}
+
+async function ripristinaBackup(pack){
+  if(!pack || !pack.stato) throw new Error("pacchetto non valido");
+  if(pack.com){ COM = Object.assign({}, COM_DEF, pack.com); await store.set(ck("commessa:dati"), JSON.stringify(COM)); }
+  if(Array.isArray(pack.tavole)){ TAVOLE = pack.tavole; await saveTavole(); }
+  Object.keys(IMG).forEach(k=>delete IMG[k]);
+  for(const id in (pack.img||{})){
+    IMG[id] = pack.img[id];
+    await store.set("img:" + id, pack.img[id]);
+  }
+  for(const rid in (pack.rev||{})) await store.set(ck("archivio:" + rid), pack.rev[rid]);
+  await store.set(ck("archivio:index"), JSON.stringify(pack.index || []));
+  S = Object.assign(blank(), pack.stato);
+  renderAll(); mostraTav(); renderComSwitch(); save();
+  buildExport(); renderStorico(pack.index || []);
+}
+
+$("#bkSave").onclick = async ()=>{
+  toast("Preparo il backup…");
+  const pack = await costruisciBackup();
   dlFile(nomeFile("json").replace(".json", "_backup.json"),
          new Blob([JSON.stringify(pack)], {type:"application/json"}));
   toast("Backup salvato — " + Object.keys(pack.img).length + " immagini");
@@ -3452,21 +3498,8 @@ $("#bkLoad").onclick = ()=>{
     if(!f) return;
     if(!await askConfirm("Il ripristino sostituisce commessa, sopralluogo corrente e storico. Procedere?", "Ripristina")) return;
     try{
-      const pack = JSON.parse(await f.text());
-      if(!pack || !pack.stato) throw new Error("formato");
       toast("Ripristino in corso…");
-      if(pack.com){ COM = Object.assign({}, COM_DEF, pack.com); await store.set(ck("commessa:dati"), JSON.stringify(COM)); }
-      if(Array.isArray(pack.tavole)){ TAVOLE = pack.tavole; await saveTavole(); }
-      Object.keys(IMG).forEach(k=>delete IMG[k]);
-      for(const id in (pack.img||{})){
-        IMG[id] = pack.img[id];
-        await store.set("img:" + id, pack.img[id]);
-      }
-      for(const rid in (pack.rev||{})) await store.set(ck("archivio:" + rid), pack.rev[rid]);
-      await store.set(ck("archivio:index"), JSON.stringify(pack.index || []));
-      S = Object.assign(blank(), pack.stato);
-      renderAll(); mostraTav(); save();
-      buildExport(); renderStorico(pack.index || []);
+      await ripristinaBackup(JSON.parse(await f.text()));
       toast("Backup ripristinato");
     }catch(e){ toast("File di backup non valido"); }
   };
@@ -3507,6 +3540,12 @@ $("#closeRev").onclick = async ()=>{
   renderAll(); mostraTav(); save();
   renderStorico(idx);
   toast("Revisione " + String(S.rev).padStart(2,"0") + " aperta");
+  /* chiusa una revisione, il pacchetto va depositato: è il momento
+     in cui il lavoro è completo e vale la pena metterlo al sicuro */
+  if(msUser && (COM.spVerbali || "").trim()){
+    try{ await msSalva(true); toast("Depositato su SharePoint"); }
+    catch(e){ msStato = "Errore nel deposito: " + (e.message || e); renderMS(); }
+  }
 };
 
 $("#resetBtn").onclick = async ()=>{
@@ -3781,6 +3820,222 @@ $("#modalYes").onclick = ()=> chiudiModal($("#modalInput").classList.contains("h
 $("#modalNo").onclick = ()=> chiudiModal(null);
 $("#modal").onclick = e => { if(e.target === $("#modal")) chiudiModal(null); };
 $("#modalInput").onkeydown = e => { if(e.key === "Enter") chiudiModal($("#modalInput").value); };
+
+/* ============================================================
+   MICROSOFT 365
+   Login con l'account D2A e deposito del pacchetto commessa
+   nella cartella verbali del cantiere.
+   ============================================================ */
+const MS_CID = "e27ef3fe-8d19-4918-bb4c-239387705ecf";
+const MS_TID = "945082f5-f868-4e47-b6e3-33d97e6078be";
+const MS_SCOPES = ["User.Read", "Files.ReadWrite.All"];
+
+let msApp = null, msUser = null, msStato = "";
+
+function nomePacchetto(){
+  return "_APP_" + (slug(COM.codice) || slug(COM.indirizzo) || "commessa") + ".json";
+}
+
+async function msInit(){
+  /* dentro Claude non c'è login: l'app gira in un contesto senza dominio proprio */
+  if(IN_CLAUDE || typeof msal === "undefined"){ renderMS(); return; }
+  try{
+    msApp = new msal.PublicClientApplication({
+      auth:{
+        clientId: MS_CID,
+        authority: "https://login.microsoftonline.com/" + MS_TID,
+        redirectUri: location.origin + location.pathname
+      },
+      cache:{ cacheLocation:"sessionStorage", storeAuthStateInCookie:false }
+    });
+    if(msApp.initialize) await msApp.initialize();
+    const r = await msApp.handleRedirectPromise();
+    if(r && r.account) msApp.setActiveAccount(r.account);
+    const acc = msApp.getActiveAccount() || (msApp.getAllAccounts()[0] || null);
+    if(acc){ msApp.setActiveAccount(acc); msUser = acc; }
+  }catch(e){
+    console.error("msInit:", e);
+    msStato = "Autenticazione non disponibile: " + (e.message || e);
+  }
+  renderMS();
+}
+
+async function msToken(){
+  if(!msApp) throw new Error("autenticazione non disponibile");
+  const acc = msApp.getActiveAccount();
+  if(!acc) throw new Error("non hai effettuato l'accesso");
+  try{
+    const r = await msApp.acquireTokenSilent({scopes:MS_SCOPES, account:acc});
+    return r.accessToken;
+  }catch(e){
+    await msApp.acquireTokenRedirect({scopes:MS_SCOPES});
+    throw new Error("reindirizzamento al login in corso");
+  }
+}
+
+async function graph(path, opt){
+  const t = await msToken();
+  const o = Object.assign({}, opt || {});
+  o.headers = Object.assign({}, o.headers || {}, {Authorization:"Bearer " + t});
+  const res = await fetch("https://graph.microsoft.com/v1.0" + path, o);
+  if(!res.ok){
+    const txt = (await res.text()).slice(0, 180);
+    throw new Error("Graph " + res.status + " — " + txt);
+  }
+  return res;
+}
+
+/* Da collegamento SharePoint a identificativo della cartella */
+function idCondivisione(u){
+  const b = btoa(unescape(encodeURIComponent(u.trim())))
+    .replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+  return "u!" + b;
+}
+
+async function cartellaVerbali(){
+  const u = (COM.spVerbali || "").trim();
+  if(!/^https?:\/\//i.test(u)){
+    throw new Error("manca il collegamento alla cartella verbali nella scheda commessa");
+  }
+  const r = await graph("/shares/" + idCondivisione(u) + "/driveItem");
+  const j = await r.json();
+  if(!j.folder) throw new Error("il collegamento non punta a una cartella");
+  return {driveId:j.parentReference.driveId, id:j.id, nome:j.name};
+}
+
+async function msSalva(silenzioso){
+  const f = await cartellaVerbali();
+  const pack = await costruisciBackup();
+  const nome = nomePacchetto();
+  await graph("/drives/" + f.driveId + "/items/" + f.id + ":/" +
+              encodeURIComponent(nome) + ":/content",
+    {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(pack)});
+  await store.set(ck("ultimo:deposito"), new Date().toISOString());
+  msStato = "Ultimo deposito: " + new Date().toLocaleString("it-IT") + " in " + f.nome;
+  renderMS();
+  if(!silenzioso) toast("Depositato su SharePoint");
+  return true;
+}
+
+async function msInfoRemoto(){
+  const f = await cartellaVerbali();
+  try{
+    const r = await graph("/drives/" + f.driveId + "/items/" + f.id + ":/" +
+                          encodeURIComponent(nomePacchetto()));
+    const j = await r.json();
+    return {quando:j.lastModifiedDateTime, chi:(j.lastModifiedBy && j.lastModifiedBy.user && j.lastModifiedBy.user.displayName) || "", size:j.size, f:f};
+  }catch(e){ return null; }
+}
+
+async function msCarica(){
+  const f = await cartellaVerbali();
+  const r = await graph("/drives/" + f.driveId + "/items/" + f.id + ":/" +
+                        encodeURIComponent(nomePacchetto()) + ":/content");
+  const pack = await r.json();
+  await ripristinaBackup(pack);
+  await store.set(ck("ultimo:deposito"), new Date().toISOString());
+  msStato = "Ripreso da SharePoint" + (pack.autore ? " — ultimo autore: " + pack.autore : "");
+  renderMS();
+}
+
+/* Se qualcuno ha depositato dopo l'ultimo lavoro locale, avvisa
+   prima che il deposito successivo lo copra. */
+async function controllaRemoto(){
+  if(!msUser || !(COM.spVerbali || "").trim()) return;
+  try{
+    const info = await msInfoRemoto();
+    if(!info) return;
+    const locale = await store.get(ck("ultimo:deposito"));
+    if(locale && new Date(info.quando) <= new Date(locale)) return;
+    if(!locale) return;
+    msStato = "Attenzione: su SharePoint c'è un deposito più recente (" +
+      new Date(info.quando).toLocaleString("it-IT") +
+      (info.chi ? " di " + info.chi : "") + "). Riprendilo prima di continuare.";
+    renderMS();
+  }catch(e){}
+}
+
+function renderMS(){
+  const box = $("#msBox");
+  if(!box) return;
+  box.innerHTML = "";
+
+  if(IN_CLAUDE || typeof msal === "undefined"){
+    const p = document.createElement("div");
+    p.className = "msnote";
+    p.textContent = "Il collegamento a SharePoint funziona sulla versione pubblicata dell'app. " +
+      "Qui puoi usare il backup manuale qui sotto.";
+    box.appendChild(p);
+    return;
+  }
+
+  const riga = document.createElement("div"); riga.className = "msuser";
+  const d = document.createElement("span");
+  d.className = "dot" + (msUser ? "" : " off");
+  const t = document.createElement("div"); t.style.flex = "1";
+  if(msUser){
+    const b = document.createElement("b"); b.textContent = msUser.name || msUser.username;
+    const sm = document.createElement("small"); sm.textContent = msUser.username || "";
+    t.appendChild(b); t.appendChild(sm);
+  } else {
+    const b = document.createElement("b"); b.textContent = "Non collegato";
+    const sm = document.createElement("small"); sm.textContent = "account D2A";
+    t.appendChild(b); t.appendChild(sm);
+  }
+  riga.appendChild(d); riga.appendChild(t);
+  box.appendChild(riga);
+
+  const row = document.createElement("div"); row.className = "btn-row";
+  if(!msUser){
+    const b = document.createElement("button");
+    b.className = "btn btn-sm btn-hi btn-w";
+    b.textContent = "Accedi con account D2A";
+    b.onclick = async ()=>{
+      try{ await msApp.loginRedirect({scopes:MS_SCOPES}); }
+      catch(e){ toast("Accesso non riuscito: " + (e.message || e)); }
+    };
+    row.appendChild(b);
+  } else {
+    const sv = document.createElement("button");
+    sv.className = "btn btn-sm btn-fill"; sv.style.flex = "1";
+    sv.textContent = "Deposita su SharePoint";
+    sv.onclick = async ()=>{
+      toast("Deposito in corso…");
+      try{ await msSalva(); }catch(e){ msStato = "Errore: " + (e.message || e); renderMS(); toast("Non riuscito"); }
+    };
+    const cr = document.createElement("button");
+    cr.className = "btn btn-sm btn-gh"; cr.style.flex = "1";
+    cr.textContent = "Riprendi da SharePoint";
+    cr.onclick = async ()=>{
+      const info = await msInfoRemoto();
+      if(!info){ toast("Nessun pacchetto per questa commessa"); return; }
+      const ok = await askConfirm(
+        "Riprendere la commessa depositata su SharePoint?\n\n" +
+        "Depositata il " + new Date(info.quando).toLocaleString("it-IT") +
+        (info.chi ? " da " + info.chi : "") +
+        "\n\nSostituisce quanto hai su questo dispositivo.", "Riprendi");
+      if(!ok) return;
+      toast("Ripresa in corso…");
+      try{ await msCarica(); toast("Commessa ripresa"); }
+      catch(e){ msStato = "Errore: " + (e.message || e); renderMS(); toast("Non riuscito"); }
+    };
+    row.appendChild(sv); row.appendChild(cr);
+  }
+  box.appendChild(row);
+
+  if(msStato){
+    const p = document.createElement("div");
+    p.className = "msnote" + (msStato.indexOf("Errore") === 0 ? " warn" : "");
+    p.textContent = msStato;
+    box.appendChild(p);
+  }
+  if(msUser && !(COM.spVerbali || "").trim()){
+    const p = document.createElement("div");
+    p.className = "msnote warn";
+    p.textContent = "Manca il collegamento alla cartella verbali: compilalo nella scheda commessa.";
+    box.appendChild(p);
+  }
+}
 
 boot();
 </script>
