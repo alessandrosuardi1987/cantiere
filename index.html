@@ -15,7 +15,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
 <style>
 :root{
   --ink:#14181B;
@@ -849,11 +848,15 @@ const LOGO_D2A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANoAAABuCAAAAABk
 const D2A_SEDE = "Via Adelaide Bono Cairoli 30, 20127 Milano (MI)";
 const D2A_PIVA = "P.IVA e C.F. 10532430963";
 
-const APP_VER  = "1.1";
+const APP_VER  = "1.2";
 const APP_DATA = "2026-08-25";
 const MOD_VER  = "REV 04/2026";
 
 const STORICO_APP = [
+  ["1.2", "2026-08-25", [
+    "Correzione: la libreria di autenticazione non si caricava e il collegamento a SharePoint restava spento",
+    "Caricamento da pi\u00f9 fonti con ripiego, e messaggio d'errore esplicito quando fallisce"
+  ]],
   ["1.1", "2026-08-25", [
     "Accesso con account D2A e deposito della commessa su SharePoint",
     "Deposito automatico alla chiusura di ogni revisione",
@@ -3836,9 +3839,47 @@ function nomePacchetto(){
   return "_APP_" + (slug(COM.codice) || slug(COM.indirizzo) || "commessa") + ".json";
 }
 
+/* La libreria di autenticazione va presa da internet. Provo pi\u00f9 fonti:
+   se la prima non risponde, la seconda di solito s\u00ec. */
+const MSAL_URL = [
+  "https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.4/lib/msal-browser.min.js",
+  "https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js",
+  "https://unpkg.com/@azure/msal-browser@2.38.4/lib/msal-browser.min.js"
+];
+
+function caricaScript(u){
+  return new Promise((res, rej)=>{
+    const el = document.createElement("script");
+    el.src = u;
+    el.onload = ()=> res(u);
+    el.onerror = ()=> rej(new Error("non raggiungibile"));
+    document.head.appendChild(el);
+  });
+}
+
+async function caricaMsal(){
+  if(typeof msal !== "undefined") return true;
+  for(const u of MSAL_URL){
+    try{
+      await caricaScript(u);
+      if(typeof msal !== "undefined") return true;
+    }catch(e){ console.warn("msal da", u, "non caricata"); }
+  }
+  return false;
+}
+
 async function msInit(){
   /* dentro Claude non c'è login: l'app gira in un contesto senza dominio proprio */
-  if(IN_CLAUDE || typeof msal === "undefined"){ renderMS(); return; }
+  if(IN_CLAUDE){ renderMS(); return; }
+  msStato = "Carico l'autenticazione…";
+  renderMS();
+  const ok = await caricaMsal();
+  if(!ok){
+    msStato = "Errore: libreria di autenticazione non raggiungibile. Controlla la connessione e ricarica la pagina.";
+    renderMS();
+    return;
+  }
+  msStato = "";
   try{
     msApp = new msal.PublicClientApplication({
       auth:{
@@ -3960,12 +4001,24 @@ function renderMS(){
   if(!box) return;
   box.innerHTML = "";
 
-  if(IN_CLAUDE || typeof msal === "undefined"){
+  if(IN_CLAUDE){
     const p = document.createElement("div");
     p.className = "msnote";
     p.textContent = "Il collegamento a SharePoint funziona sulla versione pubblicata dell'app. " +
       "Qui puoi usare il backup manuale qui sotto.";
     box.appendChild(p);
+    return;
+  }
+  if(!msApp){
+    const p = document.createElement("div");
+    p.className = "msnote" + (msStato.indexOf("Errore") === 0 ? " warn" : "");
+    p.textContent = msStato || "Preparo l'autenticazione…";
+    box.appendChild(p);
+    const r = document.createElement("button");
+    r.className = "btn btn-sm btn-gh btn-w"; r.style.marginTop = "9px";
+    r.textContent = "Riprova";
+    r.onclick = ()=> msInit();
+    box.appendChild(r);
     return;
   }
 
