@@ -394,7 +394,7 @@ nav button.on{color:var(--hi)}
       <label class="f" style="margin-bottom:0"><span>Mail</span><input id="c-impMail" type="email"></label>
     </div>
     <button class="btn btn-sm btn-fill btn-w" id="comSave" style="margin-top:10px">Salva commessa</button>
-    <div class="hint">Restano memorizzati e non si azzerano tra un sopralluogo e l'altro.</div>
+    <div class="hint">Si salvano mentre scrivi e restano memorizzati tra un sopralluogo e l'altro.</div>
   </div>
 
   <div class="sec">Giornata</div>
@@ -848,11 +848,14 @@ const LOGO_D2A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANoAAABuCAAAAABk
 const D2A_SEDE = "Via Adelaide Bono Cairoli 30, 20127 Milano (MI)";
 const D2A_PIVA = "P.IVA e C.F. 10532430963";
 
-const APP_VER  = "1.2";
+const APP_VER  = "1.3";
 const APP_DATA = "2026-08-25";
 const MOD_VER  = "REV 04/2026";
 
 const STORICO_APP = [
+  ["1.3", "2026-08-25", [
+    "La scheda commessa si salva mentre scrivi: prima serviva premere «Salva commessa» e i dati inseriti andavano persi"
+  ]],
   ["1.2", "2026-08-25", [
     "Correzione: la libreria di autenticazione non si caricava e il collegamento a SharePoint restava spento",
     "Caricamento da pi\u00f9 fonti con ripiego, e messaggio d'errore esplicito quando fallisce"
@@ -1357,15 +1360,41 @@ function renderCom(){
     (r[1] ? esc(r[1]) : "…") + "</b></div>").join("");
 }
 
+let comT = null;
+async function salvaCom(){
+  await store.set(ck("commessa:dati"), JSON.stringify(COM));
+  const c = comCorrente();
+  if(c){
+    if(COM.codice) c.codice = COM.codice;
+    if(!c.nome && COM.indirizzo) c.nome = COM.indirizzo;
+    await saveCommesse();
+  }
+  renderCom(); renderComSwitch(); renderPresenti(); renderMS();
+}
+
 $("#comEdit").onclick = ()=>{
   const f = $("#comForm");
-  const open = f.classList.contains("hidden");
-  if(open) COM_F.forEach(k=>{ const el = document.getElementById("c-"+k); if(el) el.value = COM[k] || ""; });
+  const apri = f.classList.contains("hidden");
+  if(apri){
+    COM_F.forEach(k=>{
+      const el = document.getElementById("c-" + k);
+      if(!el) return;
+      el.value = COM[k] || "";
+      /* i campi si salvano mentre scrivi, come tutto il resto dell'app */
+      el.oninput = ()=>{
+        COM[k] = el.value.trim();
+        clearTimeout(comT);
+        comT = setTimeout(salvaCom, 400);
+      };
+      el.onchange = el.oninput;
+    });
+  }
   f.classList.toggle("hidden");
-  $("#comEdit").textContent = open ? "Chiudi senza salvare" : "Modifica dati commessa";
+  $("#comEdit").textContent = apri ? "Chiudi scheda" : "Modifica dati commessa";
 };
 
 $("#comSave").onclick = async ()=>{
+  clearTimeout(comT);
   COM_F.forEach(k=>{ const el = document.getElementById("c-"+k); if(el) COM[k] = el.value.trim(); });
   await store.set(ck("commessa:dati"), JSON.stringify(COM));
   $("#comForm").classList.add("hidden");
