@@ -665,7 +665,7 @@ nav button.on{color:var(--hi)}
   <div class="sec">PDF di campo</div>
   <div class="card">
     <button class="btn btn-w btn-hi" id="pdfBtn">Genera PDF del sopralluogo</button>
-    <div class="hint">Riepilogo stampabile con tavola annotata e tutte le foto. Traccia di servizio da lasciare all'impresa — non sostituisce il verbale di DL.</div>
+    <div class="hint">Riepilogo stampabile con tavola annotata e tutte le foto, da lasciare all'impresa o da tenere come traccia del sopralluogo.</div>
   </div>
 
   <div class="sec">Scheda per il verbale</div>
@@ -848,11 +848,14 @@ const LOGO_D2A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANoAAABuCAAAAABk
 const D2A_SEDE = "Via Adelaide Bono Cairoli 30, 20127 Milano (MI)";
 const D2A_PIVA = "P.IVA e C.F. 10532430963";
 
-const APP_VER  = "1.3";
+const APP_VER  = "1.4";
 const APP_DATA = "2026-08-25";
 const MOD_VER  = "REV 04/2026";
 
 const STORICO_APP = [
+  ["1.4", "2026-08-25", [
+    "Pi\u00e8 di pagina del PDF: al posto della dicitura sul valore del documento, codice commessa e indirizzo del cantiere"
+  ]],
   ["1.3", "2026-08-25", [
     "La scheda commessa si salva mentre scrivi: prima serviva premere «Salva commessa» e i dati inseriti andavano persi"
   ]],
@@ -3372,8 +3375,8 @@ async function makePDF(lib){
     doc.setPage(p);
     doc.setFont("helvetica","normal"); doc.setFontSize(7);
     doc.setTextColor(PDF_GR[0],PDF_GR[1],PDF_GR[2]);
-    doc.text("D2A S.R.L.   ·   documento di campo, non sostituisce il verbale di Direzione Lavori e Coordinamento Sicurezza" +
-             "   ·   modello " + MOD_COM + "   ·   app v" + APP_VER, M, 289);
+    doc.text("D2A S.R.L.   ·   " + (COM.codice ? COM.codice + "   ·   " : "") +
+             (COM.indirizzo || "") + "   ·   modello " + MOD_COM + "   ·   app v" + APP_VER, M, 289);
     doc.text(p + " / " + n, PW-M, 289, {align:"right"});
   }
 
