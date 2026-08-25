@@ -665,6 +665,7 @@ nav button.on{color:var(--hi)}
   <div class="sec">PDF di campo</div>
   <div class="card">
     <button class="btn btn-w btn-hi" id="pdfBtn">Genera PDF del sopralluogo</button>
+    <div id="pdfLink"></div>
     <div class="hint">Riepilogo stampabile con tavola annotata e tutte le foto, da lasciare all'impresa o da tenere come traccia del sopralluogo.</div>
   </div>
 
@@ -848,11 +849,19 @@ const LOGO_D2A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANoAAABuCAAAAABk
 const D2A_SEDE = "Via Adelaide Bono Cairoli 30, 20127 Milano (MI)";
 const D2A_PIVA = "P.IVA e C.F. 10532430963";
 
-const APP_VER  = "1.4";
+const APP_VER  = "1.6";
 const APP_DATA = "2026-08-25";
 const MOD_VER  = "REV 04/2026";
 
 const STORICO_APP = [
+  ["1.6", "2026-08-25", [
+    "Dallo storico si può riscaricare il PDF di una revisione chiusa, oltre alla scheda"
+  ]],
+  ["1.5", "2026-08-25", [
+    "Correzione: su Safari il PDF non si apriva (errore blob). Ora arriva come download, con collegamento di riserva se il browser lo blocca",
+    "Anche il generatore PDF viene cercato su pi\u00f9 fonti",
+    "Errori del PDF mostrati per esteso invece di un messaggio generico"
+  ]],
   ["1.4", "2026-08-25", [
     "Pi\u00e8 di pagina del PDF: al posto della dicitura sul valore del documento, codice commessa e indirizzo del cantiere"
   ]],
@@ -1180,6 +1189,17 @@ let toastT;
 function toast(msg){
   const t = $("#toast"); t.textContent = msg; t.classList.add("on");
   clearTimeout(toastT); toastT = setTimeout(()=>t.classList.remove("on"), 2200);
+}
+
+/* Carica una libreria esterna, usata sia per il PDF sia per l'autenticazione. */
+function caricaScript(u){
+  return new Promise((res, rej)=>{
+    const el = document.createElement("script");
+    el.src = u;
+    el.onload = ()=> res(u);
+    el.onerror = ()=> rej(new Error("non raggiungibile"));
+    document.head.appendChild(el);
+  });
 }
 
 function slug(t){
@@ -2875,18 +2895,38 @@ $("#copyBtn").onclick = async ()=>{
    ============================================================ */
 const PDF_INK = [20,24,27], PDF_YEL = [255,200,0], PDF_GR = [107,117,124], PDF_LN = [196,204,204];
 
+const JSPDF_URL = [
+  "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
+  "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
+  "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"
+];
+
+async function caricaJsPDF(){
+  if(window.jspdf && window.jspdf.jsPDF) return window.jspdf;
+  for(const u of JSPDF_URL){
+    try{
+      await caricaScript(u);
+      if(window.jspdf && window.jspdf.jsPDF) return window.jspdf;
+    }catch(e){ console.warn("jsPDF da", u, "non caricata"); }
+  }
+  return null;
+}
+
 $("#pdfBtn").onclick = async ()=>{
-  const lib = window.jspdf;
-  if(!lib || !lib.jsPDF){
-    toast("Generatore PDF non caricato — serve connessione al primo avvio");
+  toast("Genero il PDF…");
+  const lib = await caricaJsPDF();
+  if(!lib){
+    toast("Generatore PDF non raggiungibile — controlla la connessione");
     return;
   }
-  toast("Genero il PDF…");
   try{ await makePDF(lib); }
-  catch(e){ toast("Errore nella generazione del PDF"); }
+  catch(e){
+    console.error("makePDF:", e);
+    toast("Errore nel PDF: " + (e && e.message ? e.message : e));
+  }
 };
 
-async function makePDF(lib){
+async function makePDF(lib, boxId){
   const doc = new lib.jsPDF({unit:"mm", format:"a4"});
   const M = 14, PW = 210, CW = PW - 2*M, BOT = 278;
   let y = 0;
@@ -3380,8 +3420,52 @@ async function makePDF(lib){
     doc.text(p + " / " + n, PW-M, 289, {align:"right"});
   }
 
-  doc.save(nomeFile("pdf"));
-  toast("PDF generato");
+  consegnaPDF(doc, boxId);
+}
+
+/* Safari fallisce ad aprire i blob in una scheda nuova (WebKitBlobResource).
+   Consegno il file con un collegamento di download e, se non basta,
+   lascio un pulsante su cui l'utente pu\u00f2 toccare. */
+function consegnaPDF(doc, boxId){
+  const nome = nomeFile("pdf");
+  let blob;
+  try{ blob = doc.output("blob"); }
+  catch(e){ toast("PDF non generato: " + (e.message || e)); return; }
+
+  const url = URL.createObjectURL(blob);
+  let scaricato = false;
+  try{
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = nome;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>a.remove(), 1000);
+    scaricato = true;
+  }catch(e){ console.error("download:", e); }
+
+  /* ripiego visibile: resta un collegamento da toccare */
+  const box = document.getElementById(boxId || "pdfLink");
+  if(box){
+    box.innerHTML = "";
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = nome;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.className = "btn btn-sm btn-hi btn-w";
+    a.style.cssText = "display:block;text-align:center;text-decoration:none;margin-top:9px";
+    a.textContent = "Apri " + nome;
+    box.appendChild(a);
+    const h = document.createElement("div");
+    h.className = "hint";
+    h.textContent = "Se il file non si è aperto da solo, tocca qui. Su iPhone scegli «Salva su File» o «Condividi».";
+    box.appendChild(h);
+  }
+  /* il collegamento resta valido finché la pagina è aperta */
+  toast(scaricato ? "PDF generato" : "PDF pronto — tocca il collegamento");
 }
 
 /* ============================================================
@@ -3429,6 +3513,43 @@ $("#verLog").onclick = ()=>{
   $("#verLog").textContent = chiuso ? "Nascondi le modifiche" : "Cosa è cambiato";
 };
 
+/* Rigenera il PDF di una revisione archiviata: lo stato completo
+   è conservato, le immagini stanno ancora in memoria permanente. */
+async function pdfRevisione(v){
+  const raw = await store.get(ck("archivio:" + v.id));
+  if(!raw) return toast("Revisione non più disponibile");
+  let arch = null;
+  try{ arch = JSON.parse(raw).stato; }catch(e){}
+  if(!arch) return toast("Stato della revisione non leggibile");
+
+  toast("Genero il PDF di R" + String(v.rev).padStart(2,"0") + "…");
+  const lib = await caricaJsPDF();
+  if(!lib) return toast("Generatore PDF non raggiungibile");
+
+  /* rimetto in memoria le immagini di quella revisione */
+  const ids = [];
+  (arch.foto || []).forEach(f=>ids.push(f.id));
+  (arch.riv || []).forEach(r=>(r.foto || []).forEach(i=>ids.push(i)));
+  TAVOLE.forEach(t=>ids.push(t.img));
+  for(const id of [...new Set(ids)]){
+    if(IMG[id]) continue;
+    const dt = await store.get("img:" + id);
+    if(dt) IMG[id] = dt;
+  }
+
+  const corrente = S;
+  const boxId = "pdfRev" + v.rev;
+  S = Object.assign(blank(), arch);
+  try{
+    await makePDF(lib, boxId);
+  }catch(e){
+    console.error("pdfRevisione:", e);
+    toast("Errore nel PDF: " + (e && e.message ? e.message : e));
+  }finally{
+    S = corrente;
+  }
+}
+
 function renderStorico(list){
   const box = $("#storico"); box.innerHTML = "";
   if(!list || !list.length){
@@ -3448,9 +3569,12 @@ function renderStorico(list){
     p.textContent = v.riv + " rilievi · " + v.aperti + " ancora aperti · " +
       v.presc + " prescrizioni · " + v.foto + " foto";
     d.appendChild(p);
+    const row = document.createElement("div");
+    row.className = "btn-row"; row.style.marginTop = "8px";
+
     const b = document.createElement("button");
-    b.className = "btn btn-sm btn-gh btn-w"; b.style.marginTop = "8px";
-    b.textContent = "Scarica scheda R" + String(v.rev).padStart(2,"0");
+    b.className = "btn btn-sm btn-gh"; b.style.flex = "1";
+    b.textContent = "Scheda";
     b.onclick = async ()=>{
       const raw = await store.get(ck("archivio:" + v.id));
       if(!raw) return toast("Revisione non più disponibile");
@@ -3460,7 +3584,16 @@ function renderStorico(list){
       dlFile(fmtData(v.data).replace(/\//g,"-") + "_R" + String(v.rev).padStart(2,"0") + "_scheda.md",
              new Blob([md], {type:"text/markdown"}));
     };
-    d.appendChild(b);
+
+    const pf = document.createElement("button");
+    pf.className = "btn btn-sm btn-fill"; pf.style.flex = "1";
+    pf.textContent = "PDF";
+    pf.onclick = ()=> pdfRevisione(v);
+
+    row.appendChild(b); row.appendChild(pf);
+    d.appendChild(row);
+    const link = document.createElement("div"); link.id = "pdfRev" + v.rev;
+    d.appendChild(link);
     box.appendChild(d);
   });
 }
@@ -3878,16 +4011,6 @@ const MSAL_URL = [
   "https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js",
   "https://unpkg.com/@azure/msal-browser@2.38.4/lib/msal-browser.min.js"
 ];
-
-function caricaScript(u){
-  return new Promise((res, rej)=>{
-    const el = document.createElement("script");
-    el.src = u;
-    el.onload = ()=> res(u);
-    el.onerror = ()=> rej(new Error("non raggiungibile"));
-    document.head.appendChild(el);
-  });
-}
 
 async function caricaMsal(){
   if(typeof msal !== "undefined") return true;
