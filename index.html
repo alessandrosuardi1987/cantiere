@@ -856,11 +856,20 @@ const LOGO_D2A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANoAAABuCAAAAABk
 const D2A_SEDE = "Via Adelaide Bono Cairoli 30, 20127 Milano (MI)";
 const D2A_PIVA = "P.IVA e C.F. 10532430963";
 
-const APP_VER  = "2.1";
+const APP_VER  = "2.3";
 const APP_DATA = "2026-08-25";
 const MOD_VER  = "REV 04/2026";
 
 const STORICO_APP = [
+  ["2.3", "2026-08-25", [
+    "Correzione: il nome del pacchetto dipendeva da codice o indirizzo della commessa, così due dispositivi compilati diversamente non si trovavano. Ora l'app riconosce qualunque pacchetto presente nella cartella verbali",
+    "Depositando su una cartella che ne contiene già uno, viene aggiornato quello invece di crearne un secondo",
+    "La conferma di ripresa mostra il nome del file che sta per essere caricato"
+  ]],
+  ["2.2", "2026-08-25", [
+    "Messaggi distinti fra i due permessi: cartella dell'elenco commesse (sito Corporate) e cartella verbali del cantiere. Prima un accesso negato al cantiere indicava la cartella sbagliata",
+    "Riconosciuto anche il caso di cartella verbali spostata o inesistente"
+  ]],
   ["2.1", "2026-08-25", [
     "Registro errori: ogni problema viene annotato con ora, contesto e dettaglio tecnico, con un pulsante per copiare tutto e segnalarlo",
     "Vengono catturati anche gli errori che prima passavano inosservati",
@@ -4133,6 +4142,15 @@ function chiaveCom(c){
 /* Errori tradotti: chi usa l'app non deve leggere codici HTTP */
 function erroreLeggibile(e){
   const m = String((e && e.message) || e);
+  if(m === "CARTELLA_NEGATA"){
+    return "Non hai accesso alla cartella verbali di questa commessa (" +
+           etichettaCom(comCorrente()) + "). Chiedi l'accesso in modifica al sito del cantiere " +
+           "oppure alla sola cartella indicata nella scheda commessa.";
+  }
+  if(m === "CARTELLA_ASSENTE"){
+    return "La cartella verbali indicata non esiste o è stata spostata. " +
+           "Ricopia il collegamento da SharePoint nella scheda commessa.";
+  }
   if(m.indexOf("403") > -1 || m.indexOf("accessDenied") > -1){
     return "Non hai accesso alla cartella dell'elenco commesse. " +
            "Chiedi di essere aggiunto a «55. App Verbali cantiere» nel sito Corporate.";
@@ -4336,16 +4354,50 @@ async function cartellaVerbali(){
   if(!/^https?:\/\//i.test(u)){
     throw new Error("manca il collegamento alla cartella verbali nella scheda commessa");
   }
-  const r = await graph("/shares/" + idCondivisione(u) + "/driveItem");
+  let r;
+  try{
+    r = await graph("/shares/" + idCondivisione(u) + "/driveItem");
+  }catch(e){
+    const m = String(e.message);
+    /* distinguo il cantiere dalla cartella dell'elenco: sono permessi diversi */
+    if(m.indexOf("403") > -1 || m.indexOf("accessDenied") > -1){
+      throw new Error("CARTELLA_NEGATA");
+    }
+    if(m.indexOf("404") > -1 || m.indexOf("itemNotFound") > -1){
+      throw new Error("CARTELLA_ASSENTE");
+    }
+    throw e;
+  }
   const j = await r.json();
   if(!j.folder) throw new Error("il collegamento non punta a una cartella");
   return {driveId:j.parentReference.driveId, id:j.id, nome:j.name};
 }
 
+/* Il nome del pacchetto dipendeva da codice o indirizzo: due dispositivi
+   compilati diversamente producevano file diversi. Ora cerco qualunque
+   pacchetto presente nella cartella, comunque si chiami. */
+async function trovaPacchetto(f){
+  const r = await graph("/drives/" + f.driveId + "/items/" + f.id +
+    "/children?$select=name,lastModifiedDateTime,lastModifiedBy,size&$top=200");
+  const j = await r.json();
+  const cand = (j.value || []).filter(x=>
+    /^_APP_.*\.json$/i.test(x.name || "") && !x.folder);
+  if(!cand.length) return null;
+  const esatto = cand.find(x=>x.name === nomePacchetto());
+  if(esatto) return esatto;
+  cand.sort((a,b)=> new Date(b.lastModifiedDateTime) - new Date(a.lastModifiedDateTime));
+  return cand[0];
+}
+
 async function msSalva(silenzioso){
   const f = await cartellaVerbali();
   const pack = await costruisciBackup();
-  const nome = nomePacchetto();
+  /* se un pacchetto esiste già, riuso il suo nome: niente doppioni */
+  let nome = nomePacchetto();
+  try{
+    const esistente = await trovaPacchetto(f);
+    if(esistente) nome = esistente.name;
+  }catch(e){ logErr("ricerca pacchetto", e); }
   await graph("/drives/" + f.driveId + "/items/" + f.id + ":/" +
               encodeURIComponent(nome) + ":/content",
     {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(pack)});
@@ -4361,23 +4413,19 @@ async function msSalva(silenzioso){
    erano due situazioni diverse mostrate allo stesso modo. */
 async function msInfoRemoto(){
   const f = await cartellaVerbali();
-  try{
-    const r = await graph("/drives/" + f.driveId + "/items/" + f.id + ":/" +
-                          encodeURIComponent(nomePacchetto()));
-    const j = await r.json();
-    return {quando:j.lastModifiedDateTime,
-            chi:(j.lastModifiedBy && j.lastModifiedBy.user && j.lastModifiedBy.user.displayName) || "",
-            size:j.size, f:f};
-  }catch(e){
-    if(String(e.message).indexOf("404") > -1) return null;   /* davvero non c'è */
-    throw e;                                                  /* permessi o altro */
-  }
+  const j = await trovaPacchetto(f);
+  if(!j) return null;
+  return {quando:j.lastModifiedDateTime,
+          chi:(j.lastModifiedBy && j.lastModifiedBy.user && j.lastModifiedBy.user.displayName) || "",
+          size:j.size, nome:j.name, f:f};
 }
 
 async function msCarica(){
   const f = await cartellaVerbali();
+  const trovato = await trovaPacchetto(f);
+  if(!trovato) throw new Error("nessun pacchetto nella cartella verbali");
   const r = await graph("/drives/" + f.driveId + "/items/" + f.id + ":/" +
-                        encodeURIComponent(nomePacchetto()) + ":/content");
+                        encodeURIComponent(trovato.name) + ":/content");
   const pack = await r.json();
   await ripristinaBackup(pack);
   await store.set(ck("ultimo:deposito"), new Date().toISOString());
@@ -4485,15 +4533,15 @@ function disegnaMS(box){
         return;
       }
       if(!info){
-        msStato = "Nessun pacchetto trovato per questa commessa. Cerco «" + nomePacchetto() +
-                  "» nella cartella verbali indicata: " +
-                  "o non è mai stato depositato, o il codice commessa qui è diverso da quello usato al deposito.";
+        msStato = "Nella cartella verbali indicata non c'è nessun pacchetto (nessun file _APP_….json). " +
+                  "Deposita prima dal dispositivo che ha i dati di questa commessa.";
         renderMS();
         toast("Nessun pacchetto");
         return;
       }
       const ok = await askConfirm(
         "Riprendere la commessa depositata su SharePoint?\n\n" +
+        "File: " + (info.nome || "") + "\n" +
         "Depositata il " + new Date(info.quando).toLocaleString("it-IT") +
         (info.chi ? " da " + info.chi : "") +
         "\n\nSostituisce quanto hai su questo dispositivo.", "Riprendi");
