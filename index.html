@@ -849,11 +849,16 @@ const LOGO_D2A = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANoAAABuCAAAAABk
 const D2A_SEDE = "Via Adelaide Bono Cairoli 30, 20127 Milano (MI)";
 const D2A_PIVA = "P.IVA e C.F. 10532430963";
 
-const APP_VER  = "1.6";
+const APP_VER  = "1.7";
 const APP_DATA = "2026-08-25";
 const MOD_VER  = "REV 04/2026";
 
 const STORICO_APP = [
+  ["1.7", "2026-08-25", [
+    "Elenco commesse condiviso su SharePoint: accedendo da un altro dispositivo le commesse compaiono da sole, con il loro collegamento",
+    "Allineamento automatico all'accesso e dopo ogni deposito, pi\u00f9 pulsante «Allinea elenco commesse»",
+    "Niente pi\u00f9 codici e collegamenti da riscrivere a mano su ogni dispositivo"
+  ]],
   ["1.6", "2026-08-25", [
     "Dallo storico si può riscaricare il PDF di una revisione chiusa, oltre alla scheda"
   ]],
@@ -4000,6 +4005,94 @@ const MS_SCOPES = ["User.Read", "Files.ReadWrite.All"];
 
 let msApp = null, msUser = null, msStato = "";
 
+/* Elenco commesse condiviso: un file solo, in una cartella nota all'app.
+   È la cartella Corporate dove teniamo anche le versioni. */
+const REG_DRIVE = "b!Shew8druQkSa9TFim8b-TeaP88V-7vtDhuxvipMD0pWnUDCz-mwKSpB06QT3Y8Pz";
+const REG_CART  = "01BQJIA2YDR62Z2F2TKBHK7WOCOQETYURU";
+const REG_FILE  = "_COMMESSE.json";
+
+function chiaveCom(c){
+  return ((c.codice || "") + "|" + (c.nome || "")).trim().toLowerCase();
+}
+
+async function regLeggi(){
+  try{
+    const r = await graph("/drives/" + REG_DRIVE + "/items/" + REG_CART + ":/" + REG_FILE + ":/content");
+    const j = await r.json();
+    return Array.isArray(j.commesse) ? j.commesse : [];
+  }catch(e){
+    if(String(e.message).indexOf("404") > -1) return [];   /* non esiste ancora */
+    throw e;
+  }
+}
+
+async function regScrivi(list){
+  await graph("/drives/" + REG_DRIVE + "/items/" + REG_CART + ":/" + REG_FILE + ":/content",
+    {method:"PUT", headers:{"Content-Type":"application/json"},
+     body: JSON.stringify({v:1, aggiornato:new Date().toISOString(),
+                           da:(msUser && msUser.name) || "", commesse:list})});
+}
+
+/* Raccoglie le commesse locali con il loro collegamento SharePoint */
+async function commesseLocali(){
+  const out = [];
+  const prima = CID;
+  for(const c of COMMESSE){
+    if(c.tpl) continue;
+    CID = c.id;
+    let link = "";
+    try{
+      const raw = await store.get(ck("commessa:dati"));
+      if(raw) link = (JSON.parse(raw) || {}).spVerbali || "";
+    }catch(e){}
+    out.push({codice:c.codice || "", nome:c.nome || "", spVerbali:link});
+  }
+  CID = prima;
+  return out;
+}
+
+/* Unisce elenco locale e remoto: nessuno perde le proprie commesse */
+async function sincronizzaElenco(silenzioso){
+  const remoto = await regLeggi();
+  const locali = await commesseLocali();
+
+  const mappa = {};
+  remoto.forEach(c=>{ mappa[chiaveCom(c)] = Object.assign({}, c); });
+  locali.forEach(c=>{
+    const k = chiaveCom(c);
+    if(!mappa[k]) mappa[k] = c;
+    else if(!mappa[k].spVerbali && c.spVerbali) mappa[k].spVerbali = c.spVerbali;
+  });
+  const unito = Object.values(mappa).filter(c=>c.codice || c.nome);
+
+  /* aggiungo in locale quelle che non ho */
+  const miei = {};
+  locali.forEach(c=>{ miei[chiaveCom(c)] = true; });
+  let nuove = 0;
+  for(const c of unito){
+    if(miei[chiaveCom(c)]) continue;
+    const id = "com" + Date.now().toString(36) + Math.random().toString(36).slice(2,5);
+    COMMESSE.push({id, codice:c.codice, nome:c.nome});
+    const dati = Object.assign({}, COM_DEF, {codice:c.codice, spVerbali:c.spVerbali || ""});
+    const prima = CID;
+    CID = id;
+    await store.set(ck("commessa:dati"), JSON.stringify(dati));
+    CID = prima;
+    nuove++;
+  }
+  if(nuove) await saveCommesse();
+  await regScrivi(unito);
+
+  renderComSwitch();
+  msStato = "Elenco allineato: " + unito.length + " commesse" +
+            (nuove ? ", " + nuove + " aggiunte su questo dispositivo" : "");
+  renderMS();
+  if(!silenzioso){
+    toast(nuove ? nuove + " commesse aggiunte" : "Elenco già allineato");
+  }
+  return nuove;
+}
+
 function nomePacchetto(){
   return "_APP_" + (slug(COM.codice) || slug(COM.indirizzo) || "commessa") + ".json";
 }
@@ -4048,7 +4141,10 @@ async function msInit(){
     const r = await msApp.handleRedirectPromise();
     if(r && r.account) msApp.setActiveAccount(r.account);
     const acc = msApp.getActiveAccount() || (msApp.getAllAccounts()[0] || null);
-    if(acc){ msApp.setActiveAccount(acc); msUser = acc; }
+    if(acc){
+      msApp.setActiveAccount(acc); msUser = acc;
+      sincronizzaElenco(true).catch(e=>console.warn("elenco:", e));
+    }
   }catch(e){
     console.error("msInit:", e);
     msStato = "Autenticazione non disponibile: " + (e.message || e);
@@ -4107,6 +4203,7 @@ async function msSalva(silenzioso){
               encodeURIComponent(nome) + ":/content",
     {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(pack)});
   await store.set(ck("ultimo:deposito"), new Date().toISOString());
+  try{ await sincronizzaElenco(true); }catch(e){ console.warn("elenco:", e); }
   msStato = "Ultimo deposito: " + new Date().toLocaleString("it-IT") + " in " + f.nome;
   renderMS();
   if(!silenzioso) toast("Depositato su SharePoint");
@@ -4231,11 +4328,31 @@ function renderMS(){
   }
   box.appendChild(row);
 
+  if(msUser){
+    const sy = document.createElement("button");
+    sy.className = "btn btn-sm btn-gh btn-w";
+    sy.style.marginTop = "7px";
+    sy.textContent = "Allinea elenco commesse";
+    sy.onclick = async ()=>{
+      toast("Allineo l'elenco…");
+      try{ await sincronizzaElenco(); }
+      catch(e){ msStato = "Errore: " + (e.message || e); renderMS(); toast("Non riuscito"); }
+    };
+    box.appendChild(sy);
+  }
+
   if(msStato){
     const p = document.createElement("div");
     p.className = "msnote" + (msStato.indexOf("Errore") === 0 ? " warn" : "");
     p.textContent = msStato;
     box.appendChild(p);
+  }
+  if(msUser){
+    const n = document.createElement("div");
+    n.className = "msnote";
+    n.textContent = "L'elenco commesse è condiviso: accedendo da un altro dispositivo " +
+      "le ritrovi tutte, con il loro collegamento a SharePoint. Poi «Riprendi» per scaricarne i dati.";
+    box.appendChild(n);
   }
   if(msUser && !(COM.spVerbali || "").trim()){
     const p = document.createElement("div");
